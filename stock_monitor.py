@@ -253,6 +253,8 @@ def _run_session(headed: bool) -> dict[Product, Stock]:
         screen=Screen(min_width=1280, max_width=1920, min_height=800, max_height=1080),
         os="windows",
         i_know_what_im_doing=True,
+        # On Linux without a display server camoufox needs a virtual display
+        virtual_display=not headed and sys.platform.startswith("linux"),
     ) as browser:
         page = browser.new_page()
         try:
