@@ -1,0 +1,20 @@
+# Secrets — never commit
+.env
+
+# Monitor state (lives only on the VM)
+/.monitor/
+
+# Java / Maven artefacts (legacy — kept in case Java version is still used)
+/target/
+/.tools/
+/Run NKON visual test.cmd
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db

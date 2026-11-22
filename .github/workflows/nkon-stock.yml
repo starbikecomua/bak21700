@@ -1,0 +1,71 @@
+name: NKON stock monitor
+
+# ─────────────────────────────────────────────────────────────────────────────
+# This workflow does NOT run the monitor itself — that runs on an Oracle Cloud
+# VM via a systemd timer every 15 minutes.
+#
+# What this workflow does:
+#   • On every push to main: SSH into the VM and run deploy/update.sh
+#   • Manual dispatch: lets you trigger a check / Telegram test / simulate
+#     directly from the VM (useful for debugging without SSH access)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'stock_monitor.py'
+      - 'requirements.txt'
+      - 'deploy/**'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Command to run on the VM'
+        type: choice
+        options:
+          - check-only
+          - telegram-test
+          - simulate-stock
+        default: check-only
+
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Deploy: push code changes to Oracle VM
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Oracle VM
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: SSH → update
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host:        ${{ secrets.VM_HOST }}
+          username:    ${{ secrets.VM_USER }}
+          key:         ${{ secrets.VM_SSH_KEY }}
+          port:        ${{ secrets.VM_PORT || '22' }}
+          script: bash ~/nkon-monitor/deploy/update.sh
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Manual run: execute a specific mode on the VM
+  # ───────────────────────────────────────────────────────────────────────────
+  run-on-vm:
+    name: Run on VM (${{ inputs.mode }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: SSH → run
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host:        ${{ secrets.VM_HOST }}
+          username:    ${{ secrets.VM_USER }}
+          key:         ${{ secrets.VM_SSH_KEY }}
+          port:        ${{ secrets.VM_PORT || '22' }}
+          script: |
+            cd ~/nkon-monitor
+            .venv/bin/python stock_monitor.py --${{ inputs.mode }}
