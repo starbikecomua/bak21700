@@ -167,9 +167,6 @@ green "  Timer enabled: $(systemctl --user is-active nkon-monitor.timer)"
 # =============================================================================
 # 7. Sanity checks
 # =============================================================================
-step "Sending Telegram test message"
-"$VENV/bin/python" "$INSTALL_DIR/stock_monitor.py" --telegram-test
-
 step "Running first stock check against nkon.nl"
 "$VENV/bin/python" "$INSTALL_DIR/stock_monitor.py" --check-only
 
