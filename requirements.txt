@@ -1,2 +1,2 @@
-curl_cffi>=0.7
+camoufox[geoip]==0.5.9
 certifi

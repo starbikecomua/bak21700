@@ -15,12 +15,12 @@ on:
         default: check-only
 
 permissions:
-  contents: write   # needed to persist .monitor/stock_*.txt via cache
+  contents: read
 
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       MODE: ${{ inputs.mode || 'monitor' }}
 
@@ -34,8 +34,25 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
+
+      - name: Cache Camoufox browser binary
+        uses: actions/cache@v4.2.2
+        with:
+          path: ~/.cache/camoufox
+          key: camoufox-${{ runner.os }}-0.5.9
+
+      - name: Download Camoufox browser binary
+        run: python -m camoufox fetch
+
+      - name: Install Firefox system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-0 libdbus-glib-1-2 libx11-xcb1 \
+            libxtst6 libxrandr2 libxcomposite1 libxdamage1 libxfixes3 \
+            libxi6 libasound2t64 libgbm1 libnss3 libxkbcommon0 xvfb
 
       - name: Restore stock state
         if: env.MODE == 'monitor'
@@ -45,7 +62,7 @@ jobs:
           key: nkon-stock-v1-${{ github.run_id }}
           restore-keys: nkon-stock-v1-
 
-      - name: Run
+      - name: Run monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}

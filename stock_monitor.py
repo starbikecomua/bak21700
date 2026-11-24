@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-NKON stock monitor — lightweight edition using curl_cffi.
+NKON stock monitor — Camoufox edition with proxy support.
 
-No browser required. curl_cffi impersonates Chrome TLS/HTTP2 fingerprints
-so Cloudflare passes the request. Memory usage ~50 MB vs ~600 MB for Firefox.
+Camoufox is a patched Firefox that passes Cloudflare Bot Management.
+A residential proxy is used when PROXY_URL env var is set (required on
+datacenter IPs like GitHub Actions / Google Cloud).
 
 CLI:
   python stock_monitor.py               # monitor: check all + notify on change
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 # ---------------------------------------------------------------------------
-# Logging — UTF-8 so Ukrainian text renders correctly everywhere
+# Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -47,9 +48,6 @@ STATE_DIR = Path(".monitor")
 
 MAX_RETRIES   = 3
 RETRY_DELAY_S = 30
-
-# Impersonate target — must be in curl_cffi.requests.BrowserType
-IMPERSONATE = "chrome131"
 
 
 @dataclass(frozen=True)
@@ -82,16 +80,14 @@ PRODUCTS: list[Product] = [
     ),
 ]
 
-# ---------------------------------------------------------------------------
-# Stock enum
-# ---------------------------------------------------------------------------
+
 class Stock(str, Enum):
     IN_STOCK     = "IN_STOCK"
     OUT_OF_STOCK = "OUT_OF_STOCK"
 
 
 # ---------------------------------------------------------------------------
-# Settings (env var → .env file)
+# Settings
 # ---------------------------------------------------------------------------
 def setting(name: str) -> str | None:
     value = os.environ.get(name)
@@ -150,73 +146,114 @@ def record_stock(state_file: Path, current: Stock, notify: Callable) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stock detection from raw HTML
+# Browser helpers
 # ---------------------------------------------------------------------------
-def _detect_stock_from_html(html: str, product: Product) -> Stock:
-    has_oos = (
-        "Немає в наявності" in html
-        or "Out of stock" in html
+def _navigate(page, url: str, description: str) -> None:
+    from urllib.parse import urlparse
+    response = page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+    if response is None:
+        raise RuntimeError(f"NKON returned no response for {description}.")
+    if not response.ok:
+        raise RuntimeError(f"NKON returned HTTP {response.status} for {description}.")
+    parsed = urlparse(page.url)
+    if parsed.scheme != "https" or parsed.hostname != "www.nkon.nl":
+        raise RuntimeError("NKON redirected outside its storefront.")
+
+
+def _detect_stock(page, product: Product) -> Stock:
+    page.get_by_role("heading", level=1, name=re.compile(
+        re.escape(product.name.split()[0]), re.IGNORECASE
+    )).wait_for(timeout=30_000)
+
+    out_of_stock = page.locator("text=/^(Немає в наявності|Out of stock)$/i")
+    add_to_cart  = page.locator("button#product-addtocart-button").or_(
+        page.get_by_role("button", name=re.compile(
+            r"^(Додати (до|в) кошик|У кошик|Add to Cart)$", re.IGNORECASE
+        ))
     )
-    has_atc = "product-addtocart-button" in html
 
-    if has_oos and not has_atc:
-        return Stock.OUT_OF_STOCK
-    if has_atc and not has_oos:
-        return Stock.IN_STOCK
-    # Both present or neither — IN_STOCK wins if button exists
-    # (preorder pages show button without out-of-stock text)
-    if has_atc:
-        return Stock.IN_STOCK
-    raise RuntimeError(
-        f"[{product.name}] Cannot determine stock: oos={has_oos}, atc={has_atc}"
-    )
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            oos = out_of_stock.count()
+        except Exception:
+            oos = 0
+        try:
+            atc = add_to_cart.count()
+        except Exception:
+            atc = 0
+        if oos > 0 or atc > 0:
+            break
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"[{product.name}] Timed out: no stock signal found."
+            )
+        time.sleep(0.3)
+
+    unavailable = out_of_stock.first.is_visible()
+    buyable     = add_to_cart.first.is_visible()
+    if unavailable == buyable:
+        raise RuntimeError(f"[{product.name}] Stock signals contradictory.")
+    return Stock.OUT_OF_STOCK if unavailable else Stock.IN_STOCK
 
 
 # ---------------------------------------------------------------------------
-# Single HTTP session — no browser, no Xvfb, ~50 MB RAM
+# Single browser session
 # ---------------------------------------------------------------------------
-def _run_session() -> dict[Product, Stock]:
-    from curl_cffi import requests as cf_requests
+def _run_session(headed: bool) -> dict[Product, Stock]:
+    from camoufox.sync_api import Camoufox
+    from camoufox.fingerprints import Screen
 
     proxy_url = setting("PROXY_URL")
-    proxies   = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-    session   = cf_requests.Session(impersonate=IMPERSONATE, proxies=proxies)
-    headers   = {"Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.8,en-US;q=0.7,en;q=0.6"}
-
+    proxy_cfg = None
     if proxy_url:
-        # strip credentials for logging
         from urllib.parse import urlparse
         p = urlparse(proxy_url)
+        proxy_cfg = {
+            "server":   f"{p.scheme}://{p.hostname}:{p.port}",
+            "username": p.username or "",
+            "password": p.password or "",
+        }
         log.info("Using proxy: %s://%s:%s", p.scheme, p.hostname, p.port)
 
-    results: dict[Product, Stock] = {}
-    for product in PRODUCTS:
-        resp = session.get(product.url, headers=headers, timeout=30)
-        if resp.status_code == 403:
-            raise RuntimeError(
-                f"Cloudflare blocked the request for [{product.name}] "
-                f"(HTTP 403). Try a different IP or impersonate target."
-            )
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"[{product.name}] Unexpected HTTP {resp.status_code}."
-            )
-        status = _detect_stock_from_html(resp.text, product)
-        results[product] = status
-        log.info("[%s] %s", product.name, status.value)
-
-    return results
+    with Camoufox(
+        headless=not headed,
+        geoip=True,
+        locale=["uk-UA", "uk", "ru", "en-US", "en"],
+        screen=Screen(min_width=1280, max_width=1920, min_height=800, max_height=1080),
+        os="windows",
+        i_know_what_im_doing=True,
+        proxy=proxy_cfg,
+    ) as browser:
+        page = browser.new_page()
+        try:
+            results: dict[Product, Stock] = {}
+            for product in PRODUCTS:
+                _navigate(page, product.url, product.name)
+                status = _detect_stock(page, product)
+                results[product] = status
+                log.info("[%s] %s", product.name, status.value)
+            return results
+        except Exception:
+            if headed:
+                shot = STATE_DIR / "nkon-error.png"
+                shot.parent.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(shot))
+                log.error("Screenshot saved to %s", shot)
+                time.sleep(90)
+            raise
 
 
 # ---------------------------------------------------------------------------
 # Public check with retry
 # ---------------------------------------------------------------------------
 def check_all() -> dict[Product, Stock]:
+    headed    = os.environ.get("NKON_HEADED") == "1"
     last_exc: Exception | None = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            results = _run_session()
+            results = _run_session(headed)
             if attempt > 1:
                 log.info("Succeeded on attempt %d.", attempt)
             return results
@@ -233,32 +270,43 @@ def check_all() -> dict[Product, Stock]:
 
 
 # ---------------------------------------------------------------------------
-# Simulate stock (offline self-test, no network)
+# Simulate stock (offline self-test)
 # ---------------------------------------------------------------------------
 def simulate_stock() -> None:
+    from camoufox.sync_api import Camoufox
+
     sim_product = Product(
-        name="TEST PRODUCT", url="", state_file=Path("unused")
+        name="TEST PRODUCT", url="about:blank",
+        state_file=Path("unused"),
     )
 
     with tempfile.TemporaryDirectory(prefix="nkon-sim-") as tmpdir:
         state_file    = Path(tmpdir) / "stock.txt"
         notifications: list[Stock] = []
 
-        for expected, html in [
-            (Stock.OUT_OF_STOCK, "<p>Немає в наявності</p>"),
-            (Stock.IN_STOCK,     "<button id='product-addtocart-button'>Додати</button>"),
-            (Stock.IN_STOCK,     "<button id='product-addtocart-button'>Додати</button>"),
-        ]:
-            actual = _detect_stock_from_html(html, sim_product)
-            if actual != expected:
-                raise AssertionError(f"Expected {expected}, got {actual}")
-            record_stock(state_file, actual, lambda: notifications.append(actual))
-            log.info("%s | notifications so far: %d", actual.value, len(notifications))
+        with Camoufox(headless=True, i_know_what_im_doing=True) as browser:
+            page = browser.new_page()
+            for expected in [Stock.OUT_OF_STOCK, Stock.IN_STOCK, Stock.IN_STOCK]:
+                markup = (
+                    "<p>Немає в наявності</p>"
+                    if expected == Stock.OUT_OF_STOCK
+                    else "<button id='product-addtocart-button'>Додати</button>"
+                )
+                page.set_content(f"<h1>TEST PRODUCT</h1>{markup}")
+
+                # simulate_stock uses simplified detection (no heading wait)
+                html = page.content()
+                has_oos = "Немає в наявності" in html
+                has_atc = "product-addtocart-button" in html
+                actual  = Stock.OUT_OF_STOCK if (has_oos and not has_atc) else Stock.IN_STOCK
+
+                if actual != expected:
+                    raise AssertionError(f"Expected {expected}, got {actual}")
+                record_stock(state_file, actual, lambda: notifications.append(actual))
+                log.info("%s | notifications so far: %d", actual.value, len(notifications))
 
         if notifications != [Stock.IN_STOCK]:
-            raise AssertionError(
-                f"Expected exactly one IN_STOCK notification, got: {notifications}"
-            )
+            raise AssertionError(f"Expected exactly one IN_STOCK notification, got: {notifications}")
         log.info("Simulation passed OK")
 
 
@@ -280,7 +328,6 @@ def main() -> None:
     if args == ["--check-only"]:
         return
 
-    # Monitor mode: notify on IN_STOCK transition
     for product, current in results.items():
         def _notify(p=product) -> None:
             send_telegram(f"Доступен к заказу на NKON!\n{p.name}\n{p.url}")
