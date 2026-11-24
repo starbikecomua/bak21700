@@ -2,13 +2,12 @@
 """
 NKON stock monitor — Camoufox edition.
 
-Camoufox is a patched Firefox that passes Cloudflare Bot Management:
-correct TLS / HTTP2 fingerprints, no webdriver flag, realistic JS environment.
+Checks product pages without authentication. Sends a Telegram notification
+when a product becomes available (in stock or available for pre-order).
 
 CLI:
-  python stock_monitor.py                # monitor: check all products + notify on change
-  python stock_monitor.py --check-only   # check and print results, no Telegram
-  python stock_monitor.py --telegram-test
+  python stock_monitor.py               # monitor: check all + notify on change
+  python stock_monitor.py --check-only  # print status, no Telegram
   python stock_monitor.py --simulate-stock
 """
 
@@ -28,7 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 # ---------------------------------------------------------------------------
-# Logging — force UTF-8 so Ukrainian text renders correctly on all platforms
+# Logging — UTF-8 so Ukrainian text renders correctly everywhere
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -39,17 +38,11 @@ logging.basicConfig(
 log = logging.getLogger("nkon")
 
 # ---------------------------------------------------------------------------
-# Products to monitor
-# Each product needs:
-#   name        — human-readable name used in Telegram notifications
-#   url         — full Ukrainian storefront URL
-#   heading_re  — regex that matches the H1 on that product page
+# Products
 # ---------------------------------------------------------------------------
-ORIGIN     = "https://www.nkon.nl"
-LOGIN_URL  = ORIGIN + "/en/customer/account/login/"
-UA_ACCOUNT = "/ua/customer/account/"
-ENV_FILE   = Path(".env")
-STATE_DIR  = Path(".monitor")
+ORIGIN    = "https://www.nkon.nl"
+ENV_FILE  = Path(".env")
+STATE_DIR = Path(".monitor")
 
 MAX_RETRIES   = 3
 RETRY_DELAY_S = 30
@@ -60,7 +53,7 @@ class Product:
     name:       str
     url:        str
     heading_re: re.Pattern
-    state_file: Path   # where IN_STOCK / OUT_OF_STOCK is persisted between runs
+    state_file: Path
 
 
 PRODUCTS: list[Product] = [
@@ -124,8 +117,6 @@ def send_telegram(message: str) -> None:
         f"https://api.telegram.org/bot{token}/sendMessage",
         data=body, method="POST",
     )
-
-    # Build SSL context: prefer certifi bundle, fall back to system store
     import ssl
     try:
         import certifi
@@ -161,48 +152,15 @@ def _navigate(page, url: str, description: str) -> None:
     from urllib.parse import urlparse
     response = page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     if response is None:
-        raise RuntimeError(f"NKON returned no response for the {description}.")
+        raise RuntimeError(f"NKON returned no response for {description}.")
     if not response.ok:
-        raise RuntimeError(f"NKON returned HTTP {response.status} for the {description}.")
+        raise RuntimeError(f"NKON returned HTTP {response.status} for {description}.")
     parsed = urlparse(page.url)
     if parsed.scheme != "https" or parsed.hostname != "www.nkon.nl":
         raise RuntimeError("NKON redirected outside its storefront.")
 
 
-def _require_path(page, expected: str, description: str) -> None:
-    from urllib.parse import urlparse
-    actual = urlparse(page.url).path
-    if actual != expected and (actual + "/") != expected:
-        raise RuntimeError(f"NKON did not open the {description}. Got: {actual}")
-
-
-def _sign_in_and_switch(page, email: str, password: str) -> None:
-    _navigate(page, LOGIN_URL, "sign-in page")
-
-    form = page.locator(
-        "form#login-form, form[action*='/customer/account/loginPost']"
-    ).filter(has=page.locator(":visible")).first
-    form.locator("input[name='login[username]']").fill(email)
-    form.locator("input[name='login[password]']").fill(password)
-
-    with page.expect_response(
-        lambda r: r.request.method == "POST"
-                  and "nkon.nl" in r.url
-                  and "loginpost" in r.url.lower(),
-        timeout=45_000,
-    ) as info:
-        form.locator("button[type='submit']:visible, input[type='submit']:visible").first.click()
-
-    if info.value.status >= 400:
-        raise RuntimeError(f"NKON returned HTTP {info.value.status} after sign-in.")
-
-    _navigate(page, ORIGIN + UA_ACCOUNT + "?language_switch=1", "Ukrainian account page")
-    _require_path(page, UA_ACCOUNT, "authenticated Ukrainian account page")
-    log.info("Signed in and switched to the Ukrainian storefront.")
-
-
 def _detect_stock(page, product: Product) -> Stock:
-    """Detect stock status for the already-loaded product page."""
     page.get_by_role("heading", level=1, name=product.heading_re).wait_for(timeout=30_000)
 
     out_of_stock = page.locator("text=/^(Немає в наявності|Out of stock)$/i")
@@ -212,7 +170,6 @@ def _detect_stock(page, product: Product) -> Stock:
         ))
     )
 
-    # Poll up to 15 s for either signal
     deadline = time.monotonic() + 15
     while True:
         try:
@@ -235,12 +192,12 @@ def _detect_stock(page, product: Product) -> Stock:
     unavailable = out_of_stock.first.is_visible()
     buyable     = add_to_cart.first.is_visible()
     if unavailable == buyable:
-        raise RuntimeError(f"[{product.name}] Stock signals are missing or contradictory.")
+        raise RuntimeError(f"[{product.name}] Stock signals missing or contradictory.")
     return Stock.OUT_OF_STOCK if unavailable else Stock.IN_STOCK
 
 
 # ---------------------------------------------------------------------------
-# Single browser session — checks ALL products in one login
+# Single browser session — no login, checks all products
 # ---------------------------------------------------------------------------
 def _run_session(headed: bool) -> dict[Product, Stock]:
     from camoufox.sync_api import Camoufox
@@ -253,25 +210,17 @@ def _run_session(headed: bool) -> dict[Product, Stock]:
         screen=Screen(min_width=1280, max_width=1920, min_height=800, max_height=1080),
         os="windows",
         i_know_what_im_doing=True,
-        # On Linux without a display server camoufox needs a virtual display
         virtual_display=not headed and sys.platform.startswith("linux"),
     ) as browser:
         page = browser.new_page()
         try:
-            email    = (setting("NKON_EMAIL") or "").strip()
-            password = setting("NKON_PASSWORD") or ""
-            _sign_in_and_switch(page, email, password)
-
             results: dict[Product, Stock] = {}
             for product in PRODUCTS:
-                _navigate(page, product.url, f"product page [{product.name}]")
-                _require_path(page, product.url.replace(ORIGIN, ""), f"product [{product.name}]")
+                _navigate(page, product.url, product.name)
                 status = _detect_stock(page, product)
                 results[product] = status
                 log.info("[%s] %s", product.name, status.value)
-
             return results
-
         except Exception:
             if headed:
                 shot = STATE_DIR / "nkon-error.png"
@@ -287,14 +236,9 @@ def _run_session(headed: bool) -> dict[Product, Stock]:
 # Public check with retry
 # ---------------------------------------------------------------------------
 def check_all() -> dict[Product, Stock]:
-    email    = (setting("NKON_EMAIL") or "").strip()
-    password = setting("NKON_PASSWORD") or ""
-    if not email or not password:
-        raise RuntimeError("Configure NKON_EMAIL and NKON_PASSWORD in .env or as env vars.")
-
-    headed = os.environ.get("NKON_HEADED") == "1"
-
+    headed    = os.environ.get("NKON_HEADED") == "1"
     last_exc: Exception | None = None
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             results = _run_session(headed)
@@ -308,7 +252,9 @@ def check_all() -> dict[Product, Stock]:
                 log.info("Retrying in %d s...", RETRY_DELAY_S)
                 time.sleep(RETRY_DELAY_S)
 
-    raise RuntimeError(f"All {MAX_RETRIES} attempts failed. Last error: {last_exc}") from last_exc
+    raise RuntimeError(
+        f"All {MAX_RETRIES} attempts failed. Last error: {last_exc}"
+    ) from last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -317,12 +263,10 @@ def check_all() -> dict[Product, Stock]:
 def simulate_stock() -> None:
     from camoufox.sync_api import Camoufox
 
-    # Use a dummy single-product for the simulation
     sim_product = Product(
-        name       = "TEST PRODUCT",
-        url        = "about:blank",
-        heading_re = re.compile(r"TEST PRODUCT", re.IGNORECASE),
-        state_file = Path("unused"),
+        name="TEST PRODUCT", url="about:blank",
+        heading_re=re.compile(r"TEST PRODUCT", re.IGNORECASE),
+        state_file=Path("unused"),
     )
 
     with tempfile.TemporaryDirectory(prefix="nkon-sim-") as tmpdir:
@@ -345,7 +289,9 @@ def simulate_stock() -> None:
                 log.info("%s | notifications so far: %d", actual.value, len(notifications))
 
         if notifications != [Stock.IN_STOCK]:
-            raise AssertionError(f"Expected exactly one IN_STOCK notification, got: {notifications}")
+            raise AssertionError(
+                f"Expected exactly one IN_STOCK notification, got: {notifications}"
+            )
         log.info("Simulation passed OK")
 
 
@@ -359,49 +305,9 @@ def main() -> None:
         simulate_stock()
         return
 
-    if args == ["--telegram-test"]:
-        # Send one message per product showing current OUT_OF_STOCK status
-        for product in PRODUCTS:
-            send_telegram(
-                f"Нет в наличии на NKON: {product.name}\n"
-                f"Бот настроен и следит за товаром. Уведомление придёт когда появится.\n"
-                f"{product.url}"
-            )
-            log.info("Telegram test sent for: %s", product.name)
-        return
-
-    if args == ["--notify-current"]:
-        # Check real status and send Telegram message regardless of previous state.
-        # Use this once to verify the full pipeline on the VM, then remove.
-        results = check_all()
-        for product, current in results.items():
-            status_label = "НЕТ В НАЛИЧИИ" if current == Stock.OUT_OF_STOCK else "ЕСТЬ В НАЛИЧИИ / ПРЕДЗАКАЗ"
-            send_telegram(
-                f"[Проверка] {status_label}\n{product.name}\n{product.url}"
-            )
-            log.info("Notify-current sent for %s: %s", product.name, current.value)
-        return
-
-    if args == ["--force-notify"]:
-        # Wipe saved state so the next monitor run sends a notification
-        # regardless of current stock status. Use to test Telegram on the VM.
-        # Remove this branch once confirmed working.
-        results = check_all()
-        for product, current in results.items():
-            # Clear state so record_stock treats next run as first-ever IN_STOCK
-            if product.state_file.exists():
-                product.state_file.unlink()
-                log.info("Cleared state for: %s", product.name)
-            status_label = "НЕТ В НАЛИЧИИ" if current == Stock.OUT_OF_STOCK else "ЕСТЬ В НАЛИЧИИ / ПРЕДЗАКАЗ"
-            send_telegram(
-                f"[Тест уведомлений] {status_label}\n{product.name}\n{product.url}"
-            )
-            log.info("Force-notify sent for %s: %s", product.name, current.value)
-        return
-
     if args not in ([], ["--check-only"]):
         raise SystemExit(
-            "Expected --check-only, --telegram-test, --notify-current, --simulate-stock, or no arguments."
+            "Expected --check-only, --simulate-stock, or no arguments."
         )
 
     results = check_all()
@@ -409,10 +315,10 @@ def main() -> None:
     if args == ["--check-only"]:
         return
 
-    # Monitor mode: persist state and notify on IN_STOCK transitions
+    # Monitor mode: notify when any product transitions to IN_STOCK
     for product, current in results.items():
         def _notify(p=product) -> None:
-            send_telegram(f"Появился в наличии на NKON!\n{p.name}\n{p.url}")
+            send_telegram(f"Доступен к заказу на NKON!\n{p.name}\n{p.url}")
             log.info("Telegram notification sent for: %s", p.name)
 
         record_stock(product.state_file, current, _notify)
