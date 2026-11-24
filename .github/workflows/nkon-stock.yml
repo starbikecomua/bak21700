@@ -1,71 +1,65 @@
 name: NKON stock monitor
 
-# ─────────────────────────────────────────────────────────────────────────────
-# This workflow does NOT run the monitor itself — that runs on an Oracle Cloud
-# VM via a systemd timer every 15 minutes.
-#
-# What this workflow does:
-#   • On every push to main: SSH into the VM and run deploy/update.sh
-#   • Manual dispatch: lets you trigger a check / Telegram test / simulate
-#     directly from the VM (useful for debugging without SSH access)
-# ─────────────────────────────────────────────────────────────────────────────
-
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'stock_monitor.py'
-      - 'requirements.txt'
-      - 'deploy/**'
+  schedule:
+    - cron: '0,15,30,45 * * * *'   # every 15 minutes
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Command to run on the VM'
+        description: 'Mode'
         type: choice
         options:
+          - monitor
           - check-only
-          - telegram-test
           - simulate-stock
         default: check-only
 
 permissions:
-  contents: read
+  contents: write   # needed to persist .monitor/stock_*.txt via cache
 
 jobs:
-  # ───────────────────────────────────────────────────────────────────────────
-  # Deploy: push code changes to Oracle VM
-  # ───────────────────────────────────────────────────────────────────────────
-  deploy:
-    name: Deploy to Oracle VM
-    if: github.event_name == 'push'
+  check:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    steps:
-      - name: SSH → update
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host:        ${{ secrets.VM_HOST }}
-          username:    ${{ secrets.VM_USER }}
-          key:         ${{ secrets.VM_SSH_KEY }}
-          port:        ${{ secrets.VM_PORT || '22' }}
-          script: bash ~/nkon-monitor/deploy/update.sh
+    env:
+      MODE: ${{ inputs.mode || 'monitor' }}
 
-  # ───────────────────────────────────────────────────────────────────────────
-  # Manual run: execute a specific mode on the VM
-  # ───────────────────────────────────────────────────────────────────────────
-  run-on-vm:
-    name: Run on VM (${{ inputs.mode }})
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
     steps:
-      - name: SSH → run
-        uses: appleboy/ssh-action@v1.2.0
+      - uses: actions/checkout@v4
         with:
-          host:        ${{ secrets.VM_HOST }}
-          username:    ${{ secrets.VM_USER }}
-          key:         ${{ secrets.VM_SSH_KEY }}
-          port:        ${{ secrets.VM_PORT || '22' }}
-          script: |
-            cd ~/nkon-monitor
-            .venv/bin/python stock_monitor.py --${{ inputs.mode }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore stock state
+        if: env.MODE == 'monitor'
+        uses: actions/cache/restore@v4
+        with:
+          path: .monitor/
+          key: nkon-stock-v1-${{ github.run_id }}
+          restore-keys: nkon-stock-v1-
+
+      - name: Run
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          PROXY_URL:          ${{ secrets.PROXY_URL }}
+        run: |
+          case "$MODE" in
+            monitor)        python stock_monitor.py ;;
+            check-only)     python stock_monitor.py --check-only ;;
+            simulate-stock) python stock_monitor.py --simulate-stock ;;
+          esac
+
+      - name: Save stock state
+        if: env.MODE == 'monitor'
+        uses: actions/cache/save@v4
+        with:
+          path: .monitor/
+          key: nkon-stock-v1-${{ github.run_id }}

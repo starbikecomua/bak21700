@@ -178,8 +178,16 @@ def _detect_stock_from_html(html: str, product: Product) -> Stock:
 def _run_session() -> dict[Product, Stock]:
     from curl_cffi import requests as cf_requests
 
-    session = cf_requests.Session(impersonate=IMPERSONATE)
-    headers = {"Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.8,en-US;q=0.7,en;q=0.6"}
+    proxy_url = setting("PROXY_URL")
+    proxies   = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    session   = cf_requests.Session(impersonate=IMPERSONATE, proxies=proxies)
+    headers   = {"Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.8,en-US;q=0.7,en;q=0.6"}
+
+    if proxy_url:
+        # strip credentials for logging
+        from urllib.parse import urlparse
+        p = urlparse(proxy_url)
+        log.info("Using proxy: %s://%s:%s", p.scheme, p.hostname, p.port)
 
     results: dict[Product, Stock] = {}
     for product in PRODUCTS:
