@@ -75,6 +75,12 @@ PRODUCTS: list[Product] = [
         heading_re = re.compile(r"\*\*\s+INR21700-M50LT", re.IGNORECASE),
         state_file = STATE_DIR / "stock_m50lt.txt",
     ),
+    Product(
+        name       = "EVE INR21700-58E 5700mAh 16.8A",
+        url        = ORIGIN + "/ua/eve-inr21700-58e-5700mah-16-8a.html",
+        heading_re = re.compile(r"EVE\s+INR21700-58E", re.IGNORECASE),
+        state_file = STATE_DIR / "stock_eve_58e.txt",
+    ),
 ]
 
 # ---------------------------------------------------------------------------
