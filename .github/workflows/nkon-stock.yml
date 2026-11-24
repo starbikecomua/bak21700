@@ -25,11 +25,11 @@ jobs:
       MODE: ${{ inputs.mode || 'monitor' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5.4.0
         with:
           python-version: '3.12'
           cache: pip
@@ -39,7 +39,7 @@ jobs:
 
       - name: Restore stock state
         if: env.MODE == 'monitor'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v4.2.2
         with:
           path: .monitor/
           key: nkon-stock-v1-${{ github.run_id }}
@@ -59,7 +59,7 @@ jobs:
 
       - name: Save stock state
         if: env.MODE == 'monitor'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v4.2.2
         with:
           path: .monitor/
           key: nkon-stock-v1-${{ github.run_id }}
