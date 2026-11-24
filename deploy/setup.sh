@@ -140,7 +140,20 @@ systemctl --user enable --now nkon-monitor.timer
 green "  Timer enabled: $(systemctl --user is-active nkon-monitor.timer)"
 
 # =============================================================================
-# 7. First stock check
+# 7. Persist TMPDIR in shell profile (Camoufox needs ~/tmp, not /tmp)
+# =============================================================================
+step "Setting TMPDIR=~/tmp in ~/.bashrc"
+if ! grep -q 'TMPDIR=.*tmp' "$HOME/.bashrc" 2>/dev/null; then
+    echo 'export TMPDIR="$HOME/tmp"' >> "$HOME/.bashrc"
+    mkdir -p "$HOME/tmp"
+    green "  TMPDIR added to ~/.bashrc"
+else
+    yellow "  TMPDIR already set in ~/.bashrc"
+fi
+export TMPDIR="$HOME/tmp"
+
+# =============================================================================
+# 8. First stock check
 # =============================================================================
 step "Running first stock check against nkon.nl"
 TMPDIR="$HOME/tmp" "$VENV/bin/python" "$INSTALL_DIR/stock_monitor.py" --check-only
