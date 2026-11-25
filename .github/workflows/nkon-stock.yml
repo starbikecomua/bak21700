@@ -62,6 +62,22 @@ jobs:
           key: nkon-stock-v1-${{ github.run_id }}
           restore-keys: nkon-stock-v1-
 
+      - name: Diagnose proxy and connectivity
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          # Check what IP the proxy gives us
+          PROXY_IP=$(curl -s --proxy "$PROXY_URL" https://ipinfo.io/ip 2>/dev/null || echo "failed")
+          echo "Proxy IP: $PROXY_IP"
+          # Check if nkon.nl responds via proxy with curl-impersonate headers
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --proxy "$PROXY_URL" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+            -H "Accept-Language: uk-UA,uk;q=0.9,en-US;q=0.8" \
+            "https://www.nkon.nl/ua/m50lt.html" 2>/dev/null || echo "failed")
+          echo "nkon.nl status via curl+proxy: $STATUS"
+
       - name: Run monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
